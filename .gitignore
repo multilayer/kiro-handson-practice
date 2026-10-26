@@ -1,0 +1,12 @@
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# エディタ
+.vscode/*
+!.vscode/extensions.json
+
+# 一時ファイル
+*.tmp
+~$*

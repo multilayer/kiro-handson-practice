@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>変更依頼一覧ビューア（完成見本）</title>
+<style>
+  body { font-family: "Meiryo", "Hiragino Sans", sans-serif; margin: 24px; color: #222; background: #fff; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .note { color: #666; font-size: 13px; margin: 0 0 16px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; padding: 12px 16px; background: #f7f7f7; border-radius: 8px; }
+  .controls label { font-size: 14px; }
+  .error { color: #b00020; font-weight: bold; margin: 12px 0; }
+  .summary { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
+  .chip { padding: 8px 12px; border-radius: 8px; background: #f0f0f0; font-size: 14px; }
+  .chip b { font-size: 18px; margin-left: 4px; }
+  .chip.overdue { background: #fdeee6; color: #b03d00; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { border-bottom: 1px solid #ddd; padding: 6px 8px; text-align: left; white-space: nowrap; }
+  th { background: #e6e6e6; cursor: pointer; user-select: none; }
+  th:hover { background: #d9d9d9; }
+  tr.overdue td { background: #fdeee6; color: #b03d00; font-weight: bold; }
+  td.num { text-align: right; }
+</style>
+</head>
+<body>
+  <h1>変更依頼一覧ビューア</h1>
+  <p class="note">完成見本です。CSV を選ぶと一覧を表示します。データはこの PC の中だけで処理され、どこにも送信されません。</p>
+
+  <div class="controls">
+    <label>CSV ファイル：<input type="file" id="file" accept=".csv,text/csv"></label>
+    <label>基準日：<input type="date" id="baseDate"></label>
+    <label>依頼部署：<select id="dept"><option value="">すべて</option></select></label>
+  </div>
+
+  <div id="error" class="error"></div>
+  <div id="summary" class="summary"></div>
+  <table id="table"></table>
+
+<script>
+// ===== 設定 =====
+// 必ずなければならない列
+const REQUIRED = ["依頼ID", "件名", "依頼部署", "希望リリース日", "優先度", "ステータス"];
+// ステータスの表示順
+const STATUSES = ["受付", "見積中", "開発中", "テスト中", "完了", "取り下げ"];
+// 期限切れとして扱わないステータス
+const CLOSED = ["完了", "取り下げ"];
+
+// ===== 状態 =====
+let headers = [];   // 列名の一覧
+let rows = [];      // 1行ずつのデータ（列名 → 値）
+let sortKey = null; // 利用者が選んだ並べ替えの列（null のときは初期の並び順）
+let sortAsc = true;
+
+// 基準日の初期値は今日
+const today = new Date();
+document.getElementById("baseDate").value =
+  `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+
+// ===== CSV の読み込み =====
+document.getElementById("file").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const buffer = await file.arrayBuffer();
+  const text = decode(buffer);
+  load(text);
+});
+
+// UTF-8 として読めなければ Shift_JIS として読む（Excel で保存した CSV 対策）
+function decode(buffer) {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(buffer).replace(/^﻿/, "");
+  } catch {
+    return new TextDecoder("shift_jis").decode(buffer);
+  }
+}
+
+// CSV の文字列を、行と列の二次元配列に分ける（ダブルクォートで囲まれた値にも対応）
+function parseCsv(text) {
+  const result = [];
+  let row = [], value = "", inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"' && text[i + 1] === '"') { value += '"'; i++; }
+      else if (c === '"') inQuotes = false;
+      else value += c;
+    } else if (c === '"') inQuotes = true;
+    else if (c === ",") { row.push(value); value = ""; }
+    else if (c === "\n" || c === "\r") {
+      if (c === "\r" && text[i + 1] === "\n") i++;
+      row.push(value); value = "";
+      if (row.some(v => v !== "")) result.push(row);
+      row = [];
+    } else value += c;
+  }
+  row.push(value);
+  if (row.some(v => v !== "")) result.push(row);
+  return result;
+}
+
+function load(text) {
+  const table = parseCsv(text);
+  const error = document.getElementById("error");
+  headers = (table[0] || []).map(h => h.trim());
+
+  // 必要な列がそろっているか確認する
+  const missing = REQUIRED.filter(col => !headers.includes(col));
+  if (missing.length > 0) {
+    error.textContent = `この CSV には次の列がありません：${missing.join("、")}`;
+    rows = [];
+    render();
+    return;
+  }
+  error.textContent = "";
+
+  rows = table.slice(1).map(cells => {
+    const obj = {};
+    headers.forEach((h, i) => obj[h] = (cells[i] || "").trim());
+    return obj;
+  });
+
+  // 依頼部署の選択肢を作り直す
+  const deptSelect = document.getElementById("dept");
+  const depts = [...new Set(rows.map(r => r["依頼部署"]))].sort();
+  deptSelect.innerHTML = '<option value="">すべて</option>' +
+    depts.map(d => `<option value="${escapeHtml(d)}">${escapeHtml(d)}</option>`).join("");
+
+  sortKey = null;
+  render();
+}
+
+// ===== 判定 =====
+// 期限切れ：希望リリース日が基準日より前で、完了・取り下げ以外
+function isOverdue(row) {
+  const base = document.getElementById("baseDate").value;
+  const due = row["希望リリース日"];
+  return due !== "" && base !== "" && due < base && !CLOSED.includes(row["ステータス"]);
+}
+
+// ===== 表示 =====
+function render() {
+  const dept = document.getElementById("dept").value;
+  const visible = rows.filter(r => dept === "" || r["依頼部署"] === dept);
+
+  // 並べ替え
+  if (sortKey === null) {
+    // 初期：期限切れを先頭に、その後は希望リリース日の早い順
+    visible.sort((a, b) =>
+      (isOverdue(b) - isOverdue(a)) || a["希望リリース日"].localeCompare(b["希望リリース日"]));
+  } else {
+    visible.sort((a, b) => {
+      const x = a[sortKey], y = b[sortKey];
+      const bothNumbers = x !== "" && y !== "" && !isNaN(x) && !isNaN(y);
+      const cmp = bothNumbers ? Number(x) - Number(y) : x.localeCompare(y, "ja");
+      return sortAsc ? cmp : -cmp;
+    });
+  }
+
+  renderSummary(visible);
+  renderTable(visible);
+}
+
+function renderSummary(visible) {
+  const summary = document.getElementById("summary");
+  if (headers.length === 0 || rows.length === 0) { summary.innerHTML = ""; return; }
+  const overdue = visible.filter(isOverdue).length;
+  let html = `<div class="chip overdue">期限切れ<b>${overdue}</b>件</div>`;
+  STATUSES.forEach(s => {
+    html += `<div class="chip">${s}<b>${visible.filter(r => r["ステータス"] === s).length}</b>件</div>`;
+  });
+  html += `<div class="chip">合計<b>${visible.length}</b>件</div>`;
+  summary.innerHTML = html;
+}
+
+function renderTable(visible) {
+  const table = document.getElementById("table");
+  if (rows.length === 0) { table.innerHTML = ""; return; }
+  const head = "<tr>" + headers.map(h => {
+    const mark = h === sortKey ? (sortAsc ? " ▲" : " ▼") : "";
+    return `<th data-key="${escapeHtml(h)}">${escapeHtml(h)}${mark}</th>`;
+  }).join("") + "</tr>";
+  const body = visible.map(r =>
+    `<tr class="${isOverdue(r) ? "overdue" : ""}">` +
+    headers.map(h => `<td class="${h.includes("工数") ? "num" : ""}">${escapeHtml(r[h])}</td>`).join("") +
+    "</tr>").join("");
+  table.innerHTML = head + body;
+
+  // 見出しを押したら、その列で並べ替える（同じ列をもう一度押すと逆順）
+  table.querySelectorAll("th").forEach(th => th.addEventListener("click", () => {
+    const key = th.dataset.key;
+    if (sortKey === key) sortAsc = !sortAsc;
+    else { sortKey = key; sortAsc = true; }
+    render();
+  }));
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+document.getElementById("baseDate").addEventListener("change", render);
+document.getElementById("dept").addEventListener("change", render);
+</script>
+</body>
+</html>
